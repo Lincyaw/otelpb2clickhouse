@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	metricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	pb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -96,9 +98,19 @@ func main() {
 			var mu sync.Mutex
 			sem := make(chan struct{}, threadCount)
 
-			resourceGroup := []*pb.ResourceMetrics{}
+			var resourceGroup []*pb.ResourceMetrics
 			for idx, resource := range metricData.ResourceMetrics {
+				for _, kv := range keyValues {
+					key := strings.Split(kv, "=")[0]
+					value := strings.Split(kv, "=")[1]
+					resource.GetResource().Attributes = append(resource.GetResource().Attributes, &commonpb.KeyValue{
+						Key:   key,
+						Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: value}},
+					})
+				}
+
 				resourceGroup = append(resourceGroup, resource)
+
 				if (idx+1)%100 == 0 || idx == len(metricData.ResourceMetrics)-1 {
 					sem <- struct{}{}
 					wg.Add(1)
