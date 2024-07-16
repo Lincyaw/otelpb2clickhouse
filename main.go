@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	metricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
-	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	pb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -19,6 +17,8 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 )
+
+const MaxNum = 4*1024*1024 - 1
 
 func sendRequest(ctx context.Context, clientAddr string, metricData []*pb.ResourceMetrics, bar *progressbar.ProgressBar, wg *sync.WaitGroup, mu *sync.Mutex) {
 	defer wg.Done()
@@ -53,6 +53,75 @@ func sendRequest(ctx context.Context, clientAddr string, metricData []*pb.Resour
 	if err != nil {
 		log.Fatalf("Failed to update progress bar: %v", err)
 	}
+}
+func SplitMetricData(input *pb.MetricsData) [][]*pb.ResourceMetrics {
+	if proto.Size(input) < MaxNum {
+		return [][]*pb.ResourceMetrics{input.ResourceMetrics}
+	}
+	results := make([]*pb.ResourceMetrics, 0)
+	for _, resourceMetric := range input.ResourceMetrics {
+		if proto.Size(resourceMetric) >= MaxNum {
+			// 单个 resource Metric 太大了，仍然需要拆分
+			scopeResults := make([]*pb.ScopeMetrics, 0)
+
+			for _, scopeMetric := range resourceMetric.ScopeMetrics {
+				if proto.Size(scopeMetric) >= MaxNum {
+					// 单个 scope Metric 太大了，仍然需要拆分
+					metricResults := make([]*pb.Metric, 0)
+					for _, metric := range scopeMetric.Metrics {
+						if proto.Size(metric) >= MaxNum {
+							// 单个 metric 太大了，无法进一步拆分，处理异常情况
+							panic("单个 metric 过大")
+						}
+						preMetrics := make([]*pb.Metric, len(metricResults))
+						copy(preMetrics, metricResults)
+						metricResults = append(metricResults, metric)
+
+						tempScopeMetric := &pb.ScopeMetrics{Scope: scopeMetric.Scope, Metrics: metricResults, SchemaUrl: scopeMetric.SchemaUrl}
+						if proto.Size(tempScopeMetric) >= MaxNum {
+							tempScopeMetric.Metrics = preMetrics
+							scopeResults = append(scopeResults, tempScopeMetric)
+							metricResults = []*pb.Metric{metric} // 重置
+						}
+					}
+					if len(metricResults) > 0 {
+						scopeResults = append(scopeResults, &pb.ScopeMetrics{Scope: scopeMetric.Scope, Metrics: metricResults, SchemaUrl: scopeMetric.SchemaUrl})
+					}
+					continue
+				}
+				pre := make([]*pb.ScopeMetrics, len(scopeResults))
+				copy(pre, scopeResults)
+				scopeResults = append(scopeResults, scopeMetric)
+
+				tempResourceMetric := &pb.ResourceMetrics{Resource: resourceMetric.Resource, ScopeMetrics: scopeResults, SchemaUrl: resourceMetric.SchemaUrl}
+				if proto.Size(tempResourceMetric) >= MaxNum {
+					tempResourceMetric.ScopeMetrics = pre
+					results = append(results, tempResourceMetric)
+					scopeResults = []*pb.ScopeMetrics{scopeMetric} //重置
+				}
+			}
+			if len(scopeResults) > 0 {
+				results = append(results, &pb.ResourceMetrics{Resource: resourceMetric.Resource, ScopeMetrics: scopeResults, SchemaUrl: resourceMetric.SchemaUrl})
+			}
+		} else {
+			results = append(results, resourceMetric)
+		}
+	}
+
+	finalResults := make([][]*pb.ResourceMetrics, 0)
+	batchResult := make([]*pb.ResourceMetrics, 0)
+	for _, result := range results {
+		if proto.Size(&pb.MetricsData{ResourceMetrics: batchResult})+proto.Size(result) >= MaxNum {
+			finalResults = append(finalResults, batchResult)
+			batchResult = []*pb.ResourceMetrics{result}
+		} else {
+			batchResult = append(batchResult, result)
+		}
+	}
+	if len(batchResult) > 0 {
+		finalResults = append(finalResults, batchResult)
+	}
+	return finalResults
 }
 
 func main() {
@@ -98,30 +167,21 @@ func main() {
 			var mu sync.Mutex
 			sem := make(chan struct{}, threadCount)
 
-			var resourceGroup []*pb.ResourceMetrics
-			for idx, resource := range metricData.ResourceMetrics {
-				for _, kv := range keyValues {
-					key := strings.Split(kv, "=")[0]
-					value := strings.Split(kv, "=")[1]
-					resource.GetResource().Attributes = append(resource.GetResource().Attributes, &commonpb.KeyValue{
-						Key:   key,
-						Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: value}},
-					})
+			for _, resource := range SplitMetricData(&metricData) {
+				sum := 0
+				for _, v := range resource {
+					sum += proto.Size(v)
 				}
-
-				resourceGroup = append(resourceGroup, resource)
-
-				if (idx+1)%100 == 0 || idx == len(metricData.ResourceMetrics)-1 {
-					sem <- struct{}{}
-					wg.Add(1)
-					go func(resourceGroup []*pb.ResourceMetrics) {
-						defer func() { <-sem }()
-						sendRequest(context.Background(), clientAddr, resourceGroup, bar, &wg, &mu)
-						time.Sleep(100 * time.Millisecond)
-					}(resourceGroup)
-					resourceGroup = []*pb.ResourceMetrics{}
-				}
+				fmt.Println(sum)
+				sem <- struct{}{}
+				wg.Add(1)
+				go func(resourceGroup []*pb.ResourceMetrics) {
+					defer func() { <-sem }()
+					sendRequest(context.Background(), clientAddr, resourceGroup, bar, &wg, &mu)
+					time.Sleep(100 * time.Millisecond)
+				}(resource)
 			}
+
 			wg.Wait()
 			fmt.Println("\nSent all data points")
 		},

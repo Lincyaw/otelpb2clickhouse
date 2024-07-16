@@ -6,6 +6,8 @@ services:
       - "3000:3000"
     environment:
       - GF_INSTALL_PLUGINS=vertamedia-clickhouse-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
 
   opentelemetry-collector:
     image: otel/opentelemetry-collector-contrib:latest
@@ -57,3 +59,4 @@ services:
 
 volumes:
   clickhouse_data:
+  grafana_data:
