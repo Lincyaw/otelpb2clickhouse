@@ -170,9 +170,10 @@ func main() {
 			for _, resource := range SplitMetricData(&metricData) {
 				sum := 0
 				for _, v := range resource {
+					fmt.Println("single:", proto.Size(v))
 					sum += proto.Size(v)
 				}
-				fmt.Println(sum)
+				fmt.Println("total:", sum)
 				sem <- struct{}{}
 				wg.Add(1)
 				go func(resourceGroup []*pb.ResourceMetrics) {
