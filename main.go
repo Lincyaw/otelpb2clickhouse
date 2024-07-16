@@ -55,75 +55,144 @@ func sendRequest(ctx context.Context, clientAddr string, metricData []*pb.Resour
 	}
 }
 func SplitMetricData(input *pb.MetricsData) [][]*pb.ResourceMetrics {
-	if proto.Size(input) < MaxNum {
-		return [][]*pb.ResourceMetrics{input.ResourceMetrics}
-	}
-	results := make([]*pb.ResourceMetrics, 0)
+	var result [][]*pb.ResourceMetrics
+	var currentChunk []*pb.ResourceMetrics
+	currentSize := 0
+
 	for _, resourceMetric := range input.ResourceMetrics {
-		if proto.Size(resourceMetric) >= MaxNum {
-			// 单个 resource Metric 太大了，仍然需要拆分
-			scopeResults := make([]*pb.ScopeMetrics, 0)
+		rmSize := proto.Size(resourceMetric)
 
-			for _, scopeMetric := range resourceMetric.ScopeMetrics {
-				if proto.Size(scopeMetric) >= MaxNum {
-					// 单个 scope Metric 太大了，仍然需要拆分
-					metricResults := make([]*pb.Metric, 0)
-					for _, metric := range scopeMetric.Metrics {
-						if proto.Size(metric) >= MaxNum {
-							// 单个 metric 太大了，无法进一步拆分，处理异常情况
-							panic("单个 metric 过大")
-						}
-						preMetrics := make([]*pb.Metric, len(metricResults))
-						copy(preMetrics, metricResults)
-						metricResults = append(metricResults, metric)
-
-						tempScopeMetric := &pb.ScopeMetrics{Scope: scopeMetric.Scope, Metrics: metricResults, SchemaUrl: scopeMetric.SchemaUrl}
-						if proto.Size(tempScopeMetric) >= MaxNum {
-							tempScopeMetric.Metrics = preMetrics
-							scopeResults = append(scopeResults, tempScopeMetric)
-							metricResults = []*pb.Metric{metric} // 重置
-						}
-					}
-					if len(metricResults) > 0 {
-						scopeResults = append(scopeResults, &pb.ScopeMetrics{Scope: scopeMetric.Scope, Metrics: metricResults, SchemaUrl: scopeMetric.SchemaUrl})
-					}
-					continue
-				}
-				pre := make([]*pb.ScopeMetrics, len(scopeResults))
-				copy(pre, scopeResults)
-				scopeResults = append(scopeResults, scopeMetric)
-
-				tempResourceMetric := &pb.ResourceMetrics{Resource: resourceMetric.Resource, ScopeMetrics: scopeResults, SchemaUrl: resourceMetric.SchemaUrl}
-				if proto.Size(tempResourceMetric) >= MaxNum {
-					tempResourceMetric.ScopeMetrics = pre
-					results = append(results, tempResourceMetric)
-					scopeResults = []*pb.ScopeMetrics{scopeMetric} //重置
-				}
-			}
-			if len(scopeResults) > 0 {
-				results = append(results, &pb.ResourceMetrics{Resource: resourceMetric.Resource, ScopeMetrics: scopeResults, SchemaUrl: resourceMetric.SchemaUrl})
-			}
-		} else {
-			results = append(results, resourceMetric)
+		// 如果ResourceMetrics本身就超过MaxNum的大小
+		if rmSize > MaxNum {
+			// 处理ScopeMetrics分割
+			splitResourceMetrics := splitScopeMetrics(resourceMetric)
+			result = append(result, splitResourceMetrics)
+			continue
 		}
+
+		// 如果添加当前的ResourceMetrics会超过MaxNum，开始一个新的chunk
+		if currentSize+rmSize > MaxNum {
+			if len(currentChunk) > 0 {
+				result = append(result, currentChunk)
+				currentChunk = nil
+				currentSize = 0
+			}
+		}
+
+		// 添加ResourceMetrics到当前的chunk
+		currentChunk = append(currentChunk, resourceMetric)
+		currentSize += rmSize
 	}
 
-	finalResults := make([][]*pb.ResourceMetrics, 0)
-	batchResult := make([]*pb.ResourceMetrics, 0)
-	for _, result := range results {
-		if proto.Size(&pb.MetricsData{ResourceMetrics: batchResult})+proto.Size(result) >= MaxNum {
-			finalResults = append(finalResults, batchResult)
-			batchResult = []*pb.ResourceMetrics{result}
-		} else {
-			batchResult = append(batchResult, result)
-		}
+	// 添加最后一个chunk如果它包含元素
+	if len(currentChunk) > 0 {
+		result = append(result, currentChunk)
 	}
-	if len(batchResult) > 0 {
-		finalResults = append(finalResults, batchResult)
-	}
-	return finalResults
+
+	return result
 }
 
+func splitScopeMetrics(resourceMetric *pb.ResourceMetrics) []*pb.ResourceMetrics {
+	var splitResult []*pb.ResourceMetrics
+	var currentScopeMetrics []*pb.ScopeMetrics
+	currentSize := proto.Size(resourceMetric.Resource)
+
+	for _, scopeMetric := range resourceMetric.ScopeMetrics {
+		smSize := proto.Size(scopeMetric)
+
+		// 如果 ScopeMetrics 本身就超过 MaxNum 的大小
+		if smSize > MaxNum {
+			// 处理 Metrics 分割
+			splitScopeMetrics := splitMetrics(scopeMetric, resourceMetric)
+			splitResult = append(splitResult, splitScopeMetrics...)
+			continue
+		}
+
+		// 如果添加当前的 ScopeMetrics 会超过 MaxNum，开始一个新的 chunk
+		if currentSize+smSize > MaxNum {
+			if len(currentScopeMetrics) > 0 {
+				splitResult = append(splitResult, &pb.ResourceMetrics{
+					Resource:     resourceMetric.Resource,
+					ScopeMetrics: currentScopeMetrics,
+					SchemaUrl:    resourceMetric.SchemaUrl,
+				})
+				currentScopeMetrics = nil
+				currentSize = proto.Size(resourceMetric.Resource)
+			}
+		}
+
+		// 添加 ScopeMetrics 到当前的 chunk
+		currentScopeMetrics = append(currentScopeMetrics, scopeMetric)
+		currentSize += smSize
+	}
+
+	// 添加最后一个 chunk 如果它包含元素
+	if len(currentScopeMetrics) > 0 {
+		splitResult = append(splitResult, &pb.ResourceMetrics{
+			Resource:     resourceMetric.Resource,
+			ScopeMetrics: currentScopeMetrics,
+			SchemaUrl:    resourceMetric.SchemaUrl,
+		})
+	}
+
+	return splitResult
+}
+
+func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetrics) []*pb.ResourceMetrics {
+	var splitResult []*pb.ResourceMetrics
+	var currentMetrics []*pb.Metric
+	currentSize := proto.Size(scopeMetric.Scope)
+
+	for _, metric := range scopeMetric.Metrics {
+		mSize := proto.Size(metric)
+
+		// 如果 Metric 本身就超过 MaxNum 的大小，需要特殊处理（假设不会出现这种情况）
+		if mSize > MaxNum {
+			// 这里直接跳过，假设每个 Metric 都不会超过 MaxNum
+			continue
+		}
+
+		// 如果添加当前的 Metric 会超过 MaxNum，开始一个新的 chunk
+		if currentSize+mSize > MaxNum {
+			if len(currentMetrics) > 0 {
+				splitResult = append(splitResult, &pb.ResourceMetrics{
+					Resource: resourceMetric.Resource,
+					ScopeMetrics: []*pb.ScopeMetrics{
+						{
+							Scope:     scopeMetric.Scope,
+							Metrics:   currentMetrics,
+							SchemaUrl: scopeMetric.SchemaUrl,
+						},
+					},
+					SchemaUrl: resourceMetric.SchemaUrl,
+				})
+				currentMetrics = nil
+				currentSize = proto.Size(scopeMetric.Scope)
+			}
+		}
+
+		// 添加 Metric 到当前的 chunk
+		currentMetrics = append(currentMetrics, metric)
+		currentSize += mSize
+	}
+
+	// 添加最后一个 chunk 如果它包含元素
+	if len(currentMetrics) > 0 {
+		splitResult = append(splitResult, &pb.ResourceMetrics{
+			Resource: resourceMetric.Resource,
+			ScopeMetrics: []*pb.ScopeMetrics{
+				{
+					Scope:     scopeMetric.Scope,
+					Metrics:   currentMetrics,
+					SchemaUrl: scopeMetric.SchemaUrl,
+				},
+			},
+			SchemaUrl: resourceMetric.SchemaUrl,
+		})
+	}
+
+	return splitResult
+}
 func main() {
 	var fileName string
 	var targetHost string
@@ -168,19 +237,15 @@ func main() {
 			sem := make(chan struct{}, threadCount)
 
 			for _, resource := range SplitMetricData(&metricData) {
-				sum := 0
 				for _, v := range resource {
-					fmt.Println("single:", proto.Size(v))
-					sum += proto.Size(v)
+					sem <- struct{}{}
+					wg.Add(1)
+					go func(resourceGroup []*pb.ResourceMetrics) {
+						defer func() { <-sem }()
+						sendRequest(context.Background(), clientAddr, resourceGroup, bar, &wg, &mu)
+						time.Sleep(100 * time.Millisecond)
+					}([]*pb.ResourceMetrics{v})
 				}
-				fmt.Println("total:", sum)
-				sem <- struct{}{}
-				wg.Add(1)
-				go func(resourceGroup []*pb.ResourceMetrics) {
-					defer func() { <-sem }()
-					sendRequest(context.Background(), clientAddr, resourceGroup, bar, &wg, &mu)
-					time.Sleep(100 * time.Millisecond)
-				}(resource)
 			}
 
 			wg.Wait()
