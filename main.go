@@ -20,7 +20,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const MaxNum = 3 * 1024 * 1024
+const MaxNum = 4*1024*1024 - 100000
 
 func sendRequest(ctx context.Context, clientAddr string, metricData []*pb.ResourceMetrics, bar *progressbar.ProgressBar, wg *sync.WaitGroup, mu *sync.Mutex) {
 	defer wg.Done()
@@ -57,7 +57,17 @@ func sendRequest(ctx context.Context, clientAddr string, metricData []*pb.Resour
 	}
 }
 func SplitMetricData(input *pb.MetricsData) [][]*pb.ResourceMetrics {
+	fmt.Println("SplitMetricData Splitting metric data, previous size: ", proto.Size(input))
 	var result [][]*pb.ResourceMetrics
+	defer func() {
+		for i, r := range result {
+			sum := 0
+			for _, d := range r {
+				sum += proto.Size(d)
+			}
+			fmt.Printf("SplitMetricData Group[%d]Split metric data finish, after size: %d\n", i, sum)
+		}
+	}()
 	var currentChunk []*pb.ResourceMetrics
 	currentSize := 0
 
@@ -68,7 +78,7 @@ func SplitMetricData(input *pb.MetricsData) [][]*pb.ResourceMetrics {
 		if rmSize > MaxNum {
 			// 处理ScopeMetrics分割
 			splitResourceMetrics := splitScopeMetrics(resourceMetric)
-			result = append(result, splitResourceMetrics)
+			result = append(result, splitResourceMetrics...)
 			continue
 		}
 
@@ -94,8 +104,17 @@ func SplitMetricData(input *pb.MetricsData) [][]*pb.ResourceMetrics {
 	return result
 }
 
-func splitScopeMetrics(resourceMetric *pb.ResourceMetrics) []*pb.ResourceMetrics {
-	var splitResult []*pb.ResourceMetrics
+func splitScopeMetrics(resourceMetric *pb.ResourceMetrics) [][]*pb.ResourceMetrics {
+	fmt.Println("splitScopeMetrics Splitting resource metric data, previous size: ", proto.Size(resourceMetric))
+
+	var splitResult [][]*pb.ResourceMetrics
+	defer func() {
+		for i, r := range splitResult {
+			for _, d := range r {
+				fmt.Printf("splitScopeMetrics Group[%d]Split resource metric data finish, after size: %d\n", i, proto.Size(d))
+			}
+		}
+	}()
 	var currentScopeMetrics []*pb.ScopeMetrics
 	currentSize := proto.Size(resourceMetric.Resource)
 
@@ -113,11 +132,11 @@ func splitScopeMetrics(resourceMetric *pb.ResourceMetrics) []*pb.ResourceMetrics
 		// 如果添加当前的 ScopeMetrics 会超过 MaxNum，开始一个新的 chunk
 		if currentSize+smSize > MaxNum {
 			if len(currentScopeMetrics) > 0 {
-				splitResult = append(splitResult, &pb.ResourceMetrics{
+				splitResult = append(splitResult, []*pb.ResourceMetrics{{
 					Resource:     resourceMetric.Resource,
 					ScopeMetrics: currentScopeMetrics,
 					SchemaUrl:    resourceMetric.SchemaUrl,
-				})
+				}})
 				currentScopeMetrics = nil
 				currentSize = proto.Size(resourceMetric.Resource)
 			}
@@ -130,18 +149,18 @@ func splitScopeMetrics(resourceMetric *pb.ResourceMetrics) []*pb.ResourceMetrics
 
 	// 添加最后一个 chunk 如果它包含元素
 	if len(currentScopeMetrics) > 0 {
-		splitResult = append(splitResult, &pb.ResourceMetrics{
+		splitResult = append(splitResult, []*pb.ResourceMetrics{{
 			Resource:     resourceMetric.Resource,
 			ScopeMetrics: currentScopeMetrics,
 			SchemaUrl:    resourceMetric.SchemaUrl,
-		})
+		}})
 	}
 
 	return splitResult
 }
 
-func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetrics) []*pb.ResourceMetrics {
-	var splitResult []*pb.ResourceMetrics
+func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetrics) [][]*pb.ResourceMetrics {
+	var splitResult [][]*pb.ResourceMetrics
 	var currentMetrics []*pb.Metric
 	currentSize := proto.Size(scopeMetric.Scope)
 
@@ -157,7 +176,7 @@ func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetri
 		// 如果添加当前的 Metric 会超过 MaxNum，开始一个新的 chunk
 		if currentSize+mSize > MaxNum {
 			if len(currentMetrics) > 0 {
-				splitResult = append(splitResult, &pb.ResourceMetrics{
+				splitResult = append(splitResult, []*pb.ResourceMetrics{{
 					Resource: resourceMetric.Resource,
 					ScopeMetrics: []*pb.ScopeMetrics{
 						{
@@ -167,7 +186,7 @@ func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetri
 						},
 					},
 					SchemaUrl: resourceMetric.SchemaUrl,
-				})
+				}})
 				currentMetrics = nil
 				currentSize = proto.Size(scopeMetric.Scope)
 			}
@@ -180,7 +199,7 @@ func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetri
 
 	// 添加最后一个 chunk 如果它包含元素
 	if len(currentMetrics) > 0 {
-		splitResult = append(splitResult, &pb.ResourceMetrics{
+		splitResult = append(splitResult, []*pb.ResourceMetrics{&pb.ResourceMetrics{
 			Resource: resourceMetric.Resource,
 			ScopeMetrics: []*pb.ScopeMetrics{
 				{
@@ -190,7 +209,7 @@ func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetri
 				},
 			},
 			SchemaUrl: resourceMetric.SchemaUrl,
-		})
+		}})
 	}
 
 	return splitResult
