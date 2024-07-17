@@ -244,9 +244,13 @@ func main() {
 				resourceGroupCopy := resourceGroup // 创建一个拷贝
 				for _, r := range resourceGroupCopy {
 					for _, kv := range keyValues {
-						r.GetResource().Attributes = append(r.GetResource().Attributes, &commonpb.KeyValue{
-							Key:   strings.Split(kv, "=")[0],
-							Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: strings.Split(kv, "=")[1]}},
+						keys := strings.Split(kv, "=")
+						if len(keys) != 2 {
+							fmt.Printf("Failed to split key value: %v", kv)
+						}
+						r.Resource.Attributes = append(r.Resource.Attributes, &commonpb.KeyValue{
+							Key:   keys[0],
+							Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: keys[1]}},
 						})
 					}
 				}
