@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const MaxNum = 4*1024*1024 - 1
+const MaxNum = 3 * 1024 * 1024
 
 func sendRequest(ctx context.Context, clientAddr string, metricData []*pb.ResourceMetrics, bar *progressbar.ProgressBar, wg *sync.WaitGroup, mu *sync.Mutex) {
 	defer wg.Done()
@@ -237,15 +237,13 @@ func main() {
 			sem := make(chan struct{}, threadCount)
 
 			for _, resource := range SplitMetricData(&metricData) {
-				for _, v := range resource {
-					sem <- struct{}{}
-					wg.Add(1)
-					go func(resourceGroup []*pb.ResourceMetrics) {
-						defer func() { <-sem }()
-						sendRequest(context.Background(), clientAddr, resourceGroup, bar, &wg, &mu)
-						time.Sleep(100 * time.Millisecond)
-					}([]*pb.ResourceMetrics{v})
-				}
+				sem <- struct{}{}
+				wg.Add(1)
+				go func(resourceGroup []*pb.ResourceMetrics) {
+					defer func() { <-sem }()
+					sendRequest(context.Background(), clientAddr, resourceGroup, bar, &wg, &mu)
+					time.Sleep(100 * time.Millisecond)
+				}(resource)
 			}
 
 			wg.Wait()
