@@ -196,7 +196,17 @@ func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetri
 
 	return splitResult
 }
-
+func deepCopyResourceMetrics(rm []*pb.ResourceMetrics) []*pb.ResourceMetrics {
+	data, err := proto.Marshal(&pb.MetricsData{ResourceMetrics: rm})
+	if err != nil {
+		log.Fatalf("Failed to marshal ResourceMetrics: %v", err)
+	}
+	var newRm pb.MetricsData
+	if err := proto.Unmarshal(data, &newRm); err != nil {
+		log.Fatalf("Failed to unmarshal ResourceMetrics: %v", err)
+	}
+	return newRm.ResourceMetrics
+}
 func main() {
 	var fileName string
 	var targetHost string
@@ -241,7 +251,7 @@ func main() {
 			sem := make(chan struct{}, threadCount)
 
 			for _, resourceGroup := range SplitMetricData(&metricData) {
-				resourceGroupCopy := resourceGroup // 创建一个拷贝
+				resourceGroupCopy := deepCopyResourceMetrics(resourceGroup)
 				for _, r := range resourceGroupCopy {
 					for _, kv := range keyValues {
 						keys := strings.Split(kv, "=")
