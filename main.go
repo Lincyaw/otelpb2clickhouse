@@ -56,18 +56,9 @@ func sendRequest(ctx context.Context, clientAddr string, metricData []*pb.Resour
 		log.Fatalf("Failed to update progress bar: %v", err)
 	}
 }
+
 func SplitMetricData(input *pb.MetricsData) [][]*pb.ResourceMetrics {
-	fmt.Println("SplitMetricData Splitting metric data, previous size: ", proto.Size(input))
 	var result [][]*pb.ResourceMetrics
-	defer func() {
-		for i, r := range result {
-			sum := 0
-			for _, d := range r {
-				sum += proto.Size(d)
-			}
-			fmt.Printf("SplitMetricData Group[%d]Split metric data finish, after size: %d\n", i, sum)
-		}
-	}()
 	var currentChunk []*pb.ResourceMetrics
 	currentSize := 0
 
@@ -105,16 +96,7 @@ func SplitMetricData(input *pb.MetricsData) [][]*pb.ResourceMetrics {
 }
 
 func splitScopeMetrics(resourceMetric *pb.ResourceMetrics) [][]*pb.ResourceMetrics {
-	fmt.Println("splitScopeMetrics Splitting resource metric data, previous size: ", proto.Size(resourceMetric))
-
 	var splitResult [][]*pb.ResourceMetrics
-	defer func() {
-		for i, r := range splitResult {
-			for _, d := range r {
-				fmt.Printf("splitScopeMetrics Group[%d]Split resource metric data finish, after size: %d\n", i, proto.Size(d))
-			}
-		}
-	}()
 	var currentScopeMetrics []*pb.ScopeMetrics
 	currentSize := proto.Size(resourceMetric.Resource)
 
@@ -214,6 +196,7 @@ func splitMetrics(scopeMetric *pb.ScopeMetrics, resourceMetric *pb.ResourceMetri
 
 	return splitResult
 }
+
 func main() {
 	var fileName string
 	var targetHost string
@@ -257,25 +240,23 @@ func main() {
 			var mu sync.Mutex
 			sem := make(chan struct{}, threadCount)
 
-			for _, resource := range SplitMetricData(&metricData) {
-				for _, r := range resource {
+			for _, resourceGroup := range SplitMetricData(&metricData) {
+				resourceGroupCopy := resourceGroup // 创建一个拷贝
+				for _, r := range resourceGroupCopy {
 					for _, kv := range keyValues {
 						r.GetResource().Attributes = append(r.GetResource().Attributes, &commonpb.KeyValue{
 							Key:   strings.Split(kv, "=")[0],
-							Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: strings.Split(kv, "=")[0]}},
+							Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: strings.Split(kv, "=")[1]}},
 						})
 					}
-
 				}
 				sem <- struct{}{}
 				wg.Add(1)
 				go func(resourceGroup []*pb.ResourceMetrics) {
 					defer func() { <-sem }()
 					sendRequest(context.Background(), clientAddr, resourceGroup, bar, &wg, &mu)
-					time.Sleep(100 * time.Millisecond)
-				}(resource)
+				}(resourceGroupCopy) // 传递拷贝
 			}
-
 			wg.Wait()
 			fmt.Println("\nSent all data points")
 		},
@@ -285,7 +266,7 @@ func main() {
 	rootCmd.Flags().StringVarP(&targetHost, "host", "s", "", "The target host to send metrics to")
 	rootCmd.Flags().IntVarP(&targetPort, "port", "p", 4317, "The target port to send metrics to")
 	rootCmd.Flags().StringSliceVarP(&keyValues, "keyValue", "k", []string{}, "The key-value pairs to add to metrics (format: key=value)")
-	rootCmd.Flags().IntVarP(&threadCount, "threads", "t", 10, "The number of threads to use for sending metrics")
+	rootCmd.Flags().IntVarP(&threadCount, "threads", "t", 1, "The number of threads to use for sending metrics")
 
 	err := rootCmd.MarkFlagRequired("file")
 	if err != nil {
