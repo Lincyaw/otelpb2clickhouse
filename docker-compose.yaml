@@ -17,9 +17,9 @@ services:
     volumes:
       - ./otel-config.yml:/etc/otel-config.yml
     command: ["--config=/etc/otel-config.yml"]
-#    depends_on:
-#      clickhouse:
-#        condition: service_healthy
+    depends_on:
+      clickhouse:
+        condition: service_healthy
     ulimits:
       nproc: 65535
       nofile:
